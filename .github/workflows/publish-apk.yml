@@ -1,0 +1,45 @@
+name: Publish arm64 debug APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/release-source.url"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import source and publish v0.1.0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          source_url=$(sed -n '1p' .github/release-source.url | tr -d '[:space:]')
+          apk_url=$(sed -n '2p' .github/release-source.url | tr -d '[:space:]')
+          curl -fL -X POST "$source_url" -o /tmp/video-run-source.tar.gz
+          tar -xzf /tmp/video-run-source.tar.gz
+          git add -A
+          git rm -f --ignore-unmatch .github/release-source.url
+          rm -f .github/release-source.url
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git commit -m "Publish Video Run source [skip ci]"
+          git push
+          curl -fL -X POST "$apk_url" -o /tmp/video-run-arm64-debug.apk
+          echo "af522cf5183ae327bbc8974458aefa4573e95a70adce124a249782ac545cdd55  /tmp/video-run-arm64-debug.apk" | sha256sum -c -
+          gh release create v0.1.0 /tmp/video-run-arm64-debug.apk \
+            --target main \
+            --title "Video Run v0.1.0" \
+            --notes "$(cat <<'EOF'
+          Video Run 0.1.0 arm64 debug APK.
+
+          Install on an arm64 Android phone. The launcher name is Video Run.
+
+          SHA-256: af522cf5183ae327bbc8974458aefa4573e95a70adce124a249782ac545cdd55
+          EOF
+          )"
