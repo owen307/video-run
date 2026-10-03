@@ -1,3 +1,3 @@
 const appName = 'Video Run';
-const appVersion = '1.0.0';
+const appVersion = '0.1.1';
 const iconAsset = 'assets/brand/video-run-icon.png';

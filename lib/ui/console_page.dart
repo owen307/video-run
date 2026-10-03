@@ -529,6 +529,10 @@ class _PresentationPane extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 8),
+            if (controller.presentationSide == LinkSide.live &&
+                controller.presentationWire == PresentationWire.http &&
+                playlist != null)
+              _SlideStrip(controller: controller, playlist: playlist),
             Expanded(
               child: playlist == null || playlist.items.isEmpty
                   ? const Center(
@@ -631,6 +635,101 @@ class _PresentationPane extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _SlideStrip extends StatelessWidget {
+  const _SlideStrip({required this.controller, required this.playlist});
+
+  final ConsoleController controller;
+  final ShowPlaylist playlist;
+
+  @override
+  Widget build(BuildContext context) {
+    final cards = <Widget>[];
+    for (final item in playlist.items) {
+      for (final slide in item.slides) {
+        final bytes = slide.bytes;
+        final selected = controller.activeItemIndex == item.index && controller.activeCueIndex == slide.index;
+        cards.add(
+          SizedBox(
+            width: bytes == null ? 220 : 168,
+            child: Material(
+              color: AlpacaColors.panelRaised,
+              borderRadius: BorderRadius.circular(12),
+              child: InkWell(
+                key: ValueKey('slide-${item.index}-${slide.index}'),
+                borderRadius: BorderRadius.circular(12),
+                onTap: () => controller.triggerSlide(
+                  playlistId: playlist.id,
+                  itemIndex: item.index,
+                  cueIndex: slide.index,
+                  presentationUuid: item.presentationUuid,
+                ),
+                child: Container(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: selected ? AlpacaColors.brass : Colors.transparent),
+                  ),
+                  padding: const EdgeInsets.all(6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(
+                        child: bytes == null
+                            ? Text(
+                                slide.missing ?? 'No slide image.',
+                                style: const TextStyle(color: AlpacaColors.muted, fontSize: 11, height: 1.25),
+                              )
+                            : ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: Image.memory(
+                                  bytes,
+                                  fit: BoxFit.cover,
+                                  gaplessPlayback: true,
+                                  filterQuality: FilterQuality.medium,
+                                  semanticLabel: slide.label,
+                                ),
+                              ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        slide.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+    }
+    if (cards.isEmpty) {
+      if (!controller.slidesLoading) return const SizedBox.shrink();
+      return const Padding(
+        padding: EdgeInsets.only(bottom: 8),
+        child: Text(
+          'Loading slide images from the host.',
+          style: TextStyle(color: AlpacaColors.muted),
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: SizedBox(
+        height: 148,
+        child: ListView.separated(
+          scrollDirection: Axis.horizontal,
+          itemCount: cards.length,
+          separatorBuilder: (_, _) => const SizedBox(width: 8),
+          itemBuilder: (context, index) => cards[index],
+        ),
       ),
     );
   }
