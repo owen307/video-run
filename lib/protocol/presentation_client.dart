@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../models/console_models.dart';
 import 'playlist_parse.dart';
+import 'slide_parse.dart';
 
 class PresentationException implements Exception {
   PresentationException(this.message);
@@ -95,6 +97,74 @@ class PresentationClient {
     );
   }
 
+  Future<void> triggerCue({
+    required String presentationUuid,
+    required int cueIndex,
+  }) {
+    return _act(
+      httpPath: '/v1/presentation/${Uri.encodeComponent(presentationUuid)}/$cueIndex/trigger',
+      legacy: {
+        'action': 'presentationTriggerIndex',
+        'slideIndex': '$cueIndex',
+        'presentationPath': presentationUuid,
+      },
+    );
+  }
+
+  Future<ShowItem> slidesFor(ShowItem item, {required String playlistId}) async {
+    if (_wire != PresentationWire.http) return item;
+    final type = item.itemType?.trim().toLowerCase() ?? '';
+    if (type == 'header') return item;
+    final uuid = item.presentationUuid;
+    if (uuid == null) {
+      return item.copyWith(
+        slides: [
+          ShowSlide(
+            index: 0,
+            label: item.name,
+            missing: _missingUuid(item),
+          ),
+        ],
+      );
+    }
+    final Object? body;
+    try {
+      body = await _get('/v1/presentation/${Uri.encodeComponent(uuid)}');
+    } on PresentationException catch (error) {
+      return item.copyWith(
+        slides: [
+          ShowSlide(index: 0, label: item.name, missing: error.message),
+        ],
+      );
+    }
+    final parsed = parsePresentationSlides(body);
+    if (parsed.isEmpty) {
+      return item.copyWith(
+        slides: [
+          ShowSlide(
+            index: 0,
+            label: item.name,
+            missing: 'GET /v1/presentation/$uuid returned no slides.',
+          ),
+        ],
+      );
+    }
+    final slides = List<ShowSlide?>.filled(parsed.length, null);
+    var cursor = 0;
+    Future<void> worker() async {
+      while (true) {
+        final current = cursor;
+        if (current >= parsed.length) return;
+        cursor += 1;
+        slides[current] = await _loadSlide(item, playlistId, parsed[current]);
+      }
+    }
+
+    final workers = parsed.length < 4 ? parsed.length : 4;
+    await Future.wait([for (var i = 0; i < workers; i++) worker()]);
+    return item.copyWith(slides: [for (final slide in slides) slide!]);
+  }
+
   Future<void> close() async {
     await _subscription?.cancel();
     _subscription = null;
@@ -150,10 +220,86 @@ class PresentationClient {
     return detailed;
   }
 
+  String _missingUuid(ShowItem item) {
+    final type = item.itemType?.trim().toLowerCase() ?? '';
+    if (type.isEmpty || type == 'presentation' || type == 'placeholder') {
+      return 'Missing presentation_uuid on "${item.name}". Needed for GET /v1/presentation/{uuid}/thumbnail/{index}.';
+    }
+    return '"${item.name}" is $type and has no presentation_uuid. Slide images need GET /v1/presentation/{uuid}/thumbnail/{index}.';
+  }
+
+  Future<ShowSlide> _loadSlide(ShowItem item, String playlistId, ParsedSlide slide) async {
+    if (slide.embedded != null) {
+      return ShowSlide(index: slide.index, label: slide.label, bytes: slide.embedded);
+    }
+    final uuid = item.presentationUuid;
+    final paths = <String>[
+      if (uuid != null)
+        '/v1/presentation/${Uri.encodeComponent(uuid)}/thumbnail/${slide.index}?quality=240',
+      '/v1/playlist/${Uri.encodeComponent(playlistId)}/${item.index}/thumbnail/${slide.index}?quality=240',
+    ];
+    final failures = <String>[];
+    for (final path in paths) {
+      try {
+        final bytes = await _getImage(path);
+        return ShowSlide(index: slide.index, label: slide.label, bytes: bytes);
+      } on PresentationException catch (error) {
+        failures.add(error.message);
+      }
+    }
+    final field = slide.hadImageField
+        ? ' The slide image field is not an image.'
+        : ' The slide has no image field.';
+    return ShowSlide(
+      index: slide.index,
+      label: slide.label,
+      missing: '${failures.join(' ')}$field',
+    );
+  }
+
+  Future<Uint8List> _getImage(String path) async {
+    final response = await _send(path, image: true);
+    final type = response.headers['content-type'];
+    if (response.bodyBytes.isEmpty) {
+      throw PresentationException('GET $path returned an empty body. Expected image/jpeg or image/png.');
+    }
+    if (!looksLikeImage(response.bodyBytes, type)) {
+      final label = (type == null || type.trim().isEmpty)
+          ? 'no content type'
+          : type.split(';').first.trim();
+      final preview = _textPreview(response.bodyBytes);
+      final body = preview.isEmpty ? '' : ' Body: $preview';
+      throw PresentationException('GET $path returned $label, not an image.$body');
+    }
+    return response.bodyBytes;
+  }
+
+  String _textPreview(List<int> bytes) {
+    try {
+      final text = utf8.decode(bytes).trim();
+      if (text.isEmpty || text.contains('\u0000')) return '';
+      return text.length <= 140 ? text : '${text.substring(0, 140)}…';
+    } catch (_) {
+      return '';
+    }
+  }
+
   Future<Object?> _get(String path) async {
+    final response = await _send(path, image: false);
+    if (response.bodyBytes.isEmpty) return const <String, dynamic>{};
+    try {
+      return jsonDecode(utf8.decode(response.bodyBytes));
+    } on FormatException {
+      throw PresentationException(
+        'Presentation host did not return JSON. Use the HTTP API port (often 50001), or switch this console to the legacy remote socket.',
+      );
+    }
+  }
+
+  Future<http.Response> _send(String path, {required bool image}) async {
     final uri = Uri.parse('http://$_host:$_port$path');
     final headers = <String, String>{
-      'Accept': 'application/json',
+      'Accept': image ? 'image/jpeg, image/png' : 'application/json',
       'User-Agent': 'VideoRun/1.0',
     };
     if (_secret.isNotEmpty) {
@@ -170,18 +316,16 @@ class PresentationClient {
       throw PresentationException('Presentation host did not answer at $_host:$_port');
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      if (image) {
+        throw PresentationException(
+          'GET $path returned ${response.statusCode}. Expected image/jpeg or image/png.',
+        );
+      }
       throw PresentationException(
         'Presentation host returned ${response.statusCode} for $path',
       );
     }
-    if (response.bodyBytes.isEmpty) return const <String, dynamic>{};
-    try {
-      return jsonDecode(utf8.decode(response.bodyBytes));
-    } on FormatException {
-      throw PresentationException(
-        'Presentation host did not return JSON. Use the HTTP API port (often 50001), or switch this console to the legacy remote socket.',
-      );
-    }
+    return response;
   }
 
   Future<List<ShowPlaylist>> _loadLegacy() async {

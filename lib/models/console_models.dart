@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 enum LinkSide { connecting, live, mock }
 
@@ -45,18 +46,50 @@ class VideoInput {
   int get hashCode => Object.hash(id, longName, shortName);
 }
 
+class ShowSlide {
+  const ShowSlide({
+    required this.index,
+    required this.label,
+    this.bytes,
+    this.missing,
+  });
+
+  final int index;
+  final String label;
+  final Uint8List? bytes;
+  final String? missing;
+}
+
 class ShowItem {
   const ShowItem({
     required this.id,
     required this.name,
     required this.index,
     this.triggerPath,
+    this.itemType,
+    this.presentationUuid,
+    this.slides = const [],
   });
 
   final String id;
   final String name;
   final int index;
   final String? triggerPath;
+  final String? itemType;
+  final String? presentationUuid;
+  final List<ShowSlide> slides;
+
+  ShowItem copyWith({List<ShowSlide>? slides}) {
+    return ShowItem(
+      id: id,
+      name: name,
+      index: index,
+      triggerPath: triggerPath,
+      itemType: itemType,
+      presentationUuid: presentationUuid,
+      slides: slides ?? this.slides,
+    );
+  }
 }
 
 class ShowPlaylist {

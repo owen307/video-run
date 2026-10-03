@@ -50,6 +50,8 @@ class ConsoleController extends ChangeNotifier {
   late List<ShowPlaylist> playlists;
   String? selectedPlaylistId;
   int? activeItemIndex;
+  int? activeCueIndex;
+  bool slidesLoading = false;
   String linkNote = 'Link starting';
   final List<String> eventLog = [];
   String? lastCue;
@@ -71,6 +73,7 @@ class ConsoleController extends ChangeNotifier {
   StreamSubscription<AtemSnapshot>? _switcherSub;
   StreamSubscription<LinkEnvelope>? _linkSub;
   int _generation = 0;
+  int _slideTicket = 0;
   bool _disposed = false;
   String? _lastCueKey;
   DateTime? _lastCueAt;
@@ -201,6 +204,7 @@ class ConsoleController extends ChangeNotifier {
   Future<void> clearSlide() async {
     if (presentationSide == LinkSide.connecting) return;
     activeItemIndex = null;
+    activeCueIndex = null;
     _notify();
     if (presentationSide == LinkSide.live) {
       try {
@@ -217,28 +221,30 @@ class ConsoleController extends ChangeNotifier {
     selectedPlaylistId = id;
     final playlist = _playlistById(id);
     activeItemIndex = playlist == null || playlist.items.isEmpty ? null : playlist.items.first.index;
+    activeCueIndex = null;
     _notify();
-    if (playlist == null ||
-        playlist.items.isNotEmpty ||
-        presentationSide != LinkSide.live ||
-        presentationWire != PresentationWire.http) {
-      return;
+    if (playlist != null &&
+        playlist.items.isEmpty &&
+        presentationSide == LinkSide.live &&
+        presentationWire == PresentationWire.http) {
+      try {
+        final detailed = await _presentation.fetchDetail(id);
+        playlists = [
+          for (final item in playlists)
+            if (item.id == id) detailed else item,
+        ];
+        _notify();
+      } on PresentationException catch (error) {
+        _pushLog('Playlist failed: $error');
+      }
     }
-    try {
-      final detailed = await _presentation.fetchDetail(id);
-      playlists = [
-        for (final item in playlists)
-          if (item.id == id) detailed else item,
-      ];
-      _notify();
-    } on PresentationException catch (error) {
-      _pushLog('Playlist failed: $error');
-    }
+    await _refreshSlides(id);
   }
 
   Future<void> triggerIndex(String playlistId, int index) async {
     selectedPlaylistId = playlistId;
     activeItemIndex = index;
+    activeCueIndex = null;
     _notify();
     if (presentationSide != LinkSide.live) {
       _pushLog('Triggered item ${index + 1}');
@@ -260,6 +266,36 @@ class ConsoleController extends ChangeNotifier {
       _pushLog('Triggered item ${index + 1}');
     } on PresentationException catch (error) {
       _pushLog('Trigger failed: $error');
+    }
+  }
+
+  Future<void> triggerSlide({
+    required String playlistId,
+    required int itemIndex,
+    required int cueIndex,
+    required String? presentationUuid,
+  }) async {
+    if (presentationSide == LinkSide.connecting) return;
+    selectedPlaylistId = playlistId;
+    activeItemIndex = itemIndex;
+    activeCueIndex = cueIndex;
+    _notify();
+    if (presentationSide != LinkSide.live) {
+      _pushLog('Triggered slide ${cueIndex + 1}');
+      return;
+    }
+    if (presentationUuid == null || presentationUuid.isEmpty) {
+      _pushLog('Cannot trigger slide ${cueIndex + 1}: missing presentation_uuid');
+      return;
+    }
+    try {
+      await _presentation.triggerCue(
+        presentationUuid: presentationUuid,
+        cueIndex: cueIndex,
+      );
+      _pushLog('Triggered slide ${cueIndex + 1}');
+    } on PresentationException catch (error) {
+      _pushLog('Slide trigger failed: $error');
     }
   }
 
@@ -490,6 +526,8 @@ class ConsoleController extends ChangeNotifier {
           : lists.first.items.first.index;
       presentationNote = 'Live · $host:$presentationPort';
       _notify();
+      final selected = selectedPlaylistId;
+      if (selected != null) await _refreshSlides(selected);
     } on PresentationException catch (error) {
       if (generation != _generation || _disposed) return;
       _useMockPresentation(error.message);
@@ -510,11 +548,39 @@ class ConsoleController extends ChangeNotifier {
   }
 
   void _useMockPresentation(String reason) {
+    _slideTicket += 1;
+    slidesLoading = false;
     presentationSide = LinkSide.mock;
     presentationNote = reason;
     playlists = mockPlaylists();
     selectedPlaylistId = playlists.first.id;
     activeItemIndex = 0;
+    activeCueIndex = null;
+    _notify();
+  }
+
+  Future<void> _refreshSlides(String playlistId) async {
+    if (presentationSide != LinkSide.live || presentationWire != PresentationWire.http) return;
+    final ticket = ++_slideTicket;
+    final playlist = _playlistById(playlistId);
+    if (playlist == null || playlist.items.isEmpty) {
+      slidesLoading = false;
+      _notify();
+      return;
+    }
+    slidesLoading = true;
+    _notify();
+    final items = <ShowItem>[];
+    for (final item in playlist.items) {
+      if (ticket != _slideTicket || _disposed) return;
+      items.add(await _presentation.slidesFor(item, playlistId: playlistId));
+    }
+    if (ticket != _slideTicket || _disposed || presentationSide != LinkSide.live) return;
+    playlists = [
+      for (final list in playlists)
+        if (list.id == playlistId) ShowPlaylist(id: list.id, name: list.name, items: items) else list,
+    ];
+    slidesLoading = false;
     _notify();
   }
 
